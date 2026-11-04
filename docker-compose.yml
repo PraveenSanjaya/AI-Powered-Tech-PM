@@ -1,0 +1,73 @@
+# Local development stack. Copy .env.example to .env first (see README).
+x-api-env: &api-env
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-techpm}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-techpm}
+  REDIS_URL: redis://redis:6379/0
+  CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?set CREDENTIAL_ENCRYPTION_KEY in .env}
+  APP_ENV: ${APP_ENV:-development}
+  DEMO_MODE: ${DEMO_MODE:-true}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+  COOKIE_SECURE: ${COOKIE_SECURE:-false}
+  LLM_PROVIDER: ${LLM_PROVIDER:-demo}
+  LLM_MODEL: ${LLM_MODEL:-claude-sonnet-5-5}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-techpm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-techpm}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-techpm}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: { context: ., dockerfile: infra/docker/api.Dockerfile }
+    environment: *api-env
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports: ["8000:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/readyz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    build: { context: ., dockerfile: infra/docker/api.Dockerfile }
+    command: ["celery", "-A", "app.jobs.celery_app.celery", "worker", "--loglevel=INFO", "--concurrency=2"]
+    environment: *api-env
+    depends_on:
+      api: { condition: service_healthy }
+
+  scheduler:
+    build: { context: ., dockerfile: infra/docker/api.Dockerfile }
+    command: ["celery", "-A", "app.jobs.celery_app.celery", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
+    environment: *api-env
+    depends_on:
+      api: { condition: service_healthy }
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/docker/web.Dockerfile
+      args: { API_INTERNAL_URL: "http://api:8000" }
+    depends_on:
+      api: { condition: service_healthy }
+    ports: ["3000:3000"]
+
+volumes:
+  pgdata:
